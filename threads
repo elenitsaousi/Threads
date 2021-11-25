@@ -1,0 +1,245 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+
+FILE *fp1;
+int status;
+char path[PATH_MAX];
+DIR *dir;
+pthread_mutex_t lock;
+
+int words = 0; //it starts with 0, because always there is a line-change character in end of file
+
+off_t fsize;
+int fd;
+
+int NUM_THREADS; //number of threads used
+
+int *count;
+
+char directory[PATH_MAX];
+
+void siginthandler(int sig_num) {
+   //with this we are assured that the process ignores the SIGNAL signals and prints a message
+   signal(SIGINT, siginthandler);
+   printf("Process cannot be terminated with SIGINT.\n");
+   fflush(stdout);
+}
+
+void sigtermhandler(int sig_num) {
+   //with this we are assured that the process ignores the SIGNAL signals and prints a message
+   signal(SIGTERM, sigtermhandler);
+   printf("Process cannot be terminated with SIGTERM.\n");
+   fflush(stdout);
+}
+//ó -> this character forces the program not to be considered ASCII programma
+void * srch(void *thread_id) {
+   //leitourgia anazitisis
+   int tid = *((int *) thread_id);
+   free(thread_id);
+   char **c = (char **) calloc(NUM_THREADS, sizeof(char *)); //creates different buffers for each thread
+   c[tid] = calloc((fsize/NUM_THREADS), sizeof(char));
+   //it locks so that each thread reaches the correct displacement
+   pthread_mutex_lock(&lock);
+   lseek(fd,(fsize/NUM_THREADS)*tid,SEEK_SET); //causes the browser to go to an appropriate point in the file
+   read(fd,c[tid],fsize/NUM_THREADS);
+   pthread_mutex_unlock(&lock);
+   //the characters to be read must be FILE SIZE / NUMBER OF THREADS (static parallelization)
+   while (count[tid] < (fsize/NUM_THREADS)) {
+       if (c[tid][count[tid]] == 32 || c[tid][count[tid]] == 10) {
+           //pwe have to lock the mutex to avoid bad registrations
+           pthread_mutex_lock(&lock);
+           words++; //spacebars and newline characters are considered to add a new word to the total count
+           pthread_mutex_unlock(&lock);
+       }
+       count[tid]++;
+   }
+   if (tid == NUM_THREADS - 1) {
+       int rem = fsize - (fsize/NUM_THREADS)*NUM_THREADS;
+       //lock for the last remaining characters, if they exist
+       pthread_mutex_lock(&lock);
+       lseek(fd,fsize - rem,SEEK_SET);
+       if (read(fd,c[tid],rem)) {
+           for (int i = 0; i < rem; i++) {
+               if (c[tid][i] == 32 || c[tid][i] == 10) {
+                   words++;
+               }
+           }
+       }
+       pthread_mutex_unlock(&lock);
+   }
+}
+
+int main(int argc, char** argv) {
+   signal(SIGINT, siginthandler); //ignore SIGINT
+   signal(SIGTERM, sigtermhandler); //ignore SIGTERM
+
+   FILE *output_file = fopen("output.txt","w"); //open the output file
+
+   //argv[1] einai o katalogos- directory
+   //argv[2] einai o arithmos twn nimatwn- the number of threads (static parallelization used)
+   //argc einai o arithmos twn orismatwn pou dothikan sin 1
+   if (argc == 1) {
+       if ((dir = opendir(".")) == NULL) {
+           perror("Invalid arguments given. Please give at least 0 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+           exit(1);
+       }
+       strcpy(directory,".");
+       NUM_THREADS = 2;
+       //CORRECT arguments
+   }
+   else if (argc == 2) {
+       if (atoi(argv[1]) != 0) {
+           //Directory: current
+           //NUM_THREADS: argv[2]
+           NUM_THREADS = atoi(argv[1]);
+           if (NUM_THREADS < 0) {
+               printf("Invalid arguments given. Please give at least 0 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+               return 0;
+           }
+           if ((dir = opendir(".")) == NULL) {
+               perror("Cannot open current directory.");
+               exit(1);
+           }
+           strcpy(directory,".");
+           //CORRECT arguments
+       }
+       else {
+           //Directory: argv[1]
+           //NUM_THREADS: 2
+           if ((dir = opendir(argv[1])) == NULL) {
+               perror("Invalid arguments given. Please give at least 0 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+               exit(1);
+           }
+           strcpy(directory,argv[1]);
+           NUM_THREADS = 2;
+           //CORRECT arguments
+       }
+   }
+   else if (argc == 3) {
+       //Directory: argv[1]
+       //NUM_THREADS: argv[2]
+       if ((dir = opendir(argv[1])) == NULL) {
+           perror("Invalid arguments given. Please give at least 1 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+           exit(1);
+       }
+       NUM_THREADS = atoi(argv[2]);
+       if (NUM_THREADS <= 0) {
+           printf("Invalid arguments given. Please give at least 1 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+           return 0;
+       }
+       strcpy(directory,argv[1]);
+       //CORRECT arguments
+   }
+   else {
+       printf("Invalid arguments given. Please give at least 1 and at most 2 arguments, the directory (first) and the number of threads (second).\n");
+   }
+
+   count = calloc(NUM_THREADS, sizeof(int)); //malloc space for the counter for every thread
+
+
+   //argument check performed. the program will terminate if the arguments are invalid
+   //string* asciifiles; //ascii files are considered files ending in .ascii, .asc or .txt.
+
+   struct dirent *dir2;
+   /*
+   printf("%s\n",dir->dd_name);
+   char s[200];
+   strcpy(s,dir->dd_name);
+   s[strlen(s)-1] = '\0';
+   printf("%s\n",s);
+   */
+   char s1[PATH_MAX+4],s2[PATH_MAX+20],s3[12]; //suitable space for each string
+   char asciipaths[500][250],ascii2[500][250]; //at most 500 ascii files, at most 250 characters in file path
+   int cnt = 0; //counter of which file is added to asciipaths array
+   if (dir) {
+       while ((dir2 = readdir(dir)) != NULL) {
+           //printf("%s\n",dir2->d_name);
+           strcpy(s1,"file ");
+           strcat(s1,directory);
+           strcat(s1,"/");
+           strcat(s1,dir2->d_name);
+           //printf("%s\n",s1); this must invoke the base command which states if a file is an ASCII file
+           fp1 = popen(s1,"r"); //call the bash command and save message in fp1
+           if (fp1 == NULL) {
+               perror("Error");
+               exit(1);
+           }
+           while (fgets(s2,PATH_MAX+20,fp1) != NULL) {
+               //put the output of the bash command to string s2. it will be just a line, if the command "file" is used.
+               //printf("%s\n",s2);
+           }
+           const char *last_ten = &s2[strlen(s2)-11]; //compare the last characters of the file to "ASCII text". files that are ASCII files will yield this output.
+           strcpy(s3,"ASCII text\n");
+
+           if (strcmp(s3,last_ten) == 0) {
+               //if the file checked is ASCII text
+               //printf("ASCII FOUND!\n"); -> optional debugging
+               strcpy(asciipaths[cnt++],s1); //copies the file path to the asciipaths array, increasing the counter
+           }
+       }
+       closedir(dir); //close the directory, no more needed
+   }
+
+
+
+   for (int i = 0; i < cnt; i++) {
+       strcpy(ascii2[i],asciipaths[i]+5); //remove the "file " content from the command to yield only the file path
+       //printf("%s\n",asciipaths[i]); -> optionally, the files that are ASCII files can be printed, but they will also be printed in the output.txt file
+   }
+
+   //asciipaths has the paths of all ASCII files in the array
+
+   //forking the processes
+  
+   pid_t child_pid, wpid;
+   char* flp;
+   for (int i = 0; i < cnt; i++) {
+       child_pid = fork(); //fork a process for each file
+       if (child_pid == 0) {
+           //ektelei leitourgies gia to file
+
+           flp = ascii2[i]; //assign the file to the process
+
+           fd = open(flp, O_RDONLY); //open the file for read only, so no locks needed
+           if (fd<0) return 1; //if the file could not open, return exit code 1
+
+           fsize = lseek(fd,0,SEEK_END); //file size (in bytes)
+
+           //printf("%ld\n",fsize);
+
+           if (pthread_mutex_init(&lock, NULL) != 0) {
+               printf("\n Lock init failed\n");
+               return 1;
+           }
+
+           pthread_t tid[NUM_THREADS]; //create as many threads as NUM_THREADS is
+
+           for (int j = 0; j < NUM_THREADS; j++) {
+               //make a thread and do task
+               int *arg = malloc(sizeof(*arg));
+               *arg = j;
+               pthread_create(&tid[j], NULL, srch, arg); //each process should call pthread_create to search
+           }
+           for (int j = 0; j < NUM_THREADS; j++) {
+               pthread_join(tid[j],NULL); //threads should be terminated when the processes end
+           }
+
+           fprintf(output_file,"%d, %s, %d\n",getpid(),ascii2[i],words); //every process should print the results to file output.txt in the specified format
+          
+           return 0;
+       }
+   }
+
+   while ((wpid = wait(&status)) > 0); //wait until all child processes end, in order to terminate and to avoid zombie processes
+
+   return 0;
+}
